@@ -159,7 +159,8 @@ accordion(
         tags$div(style = "font-size:.75em;color:#6c757d;margin-top:4px;line-height:1.35;",
             icon("circle-info"),
             " Example files: HaCaT keratinocyte DIA dataset — 24 samples,",
-            " 4 conditions (NoTreated, IL-13, IL-22, COMBO), 6 replicates each,",
+            " 4 conditions (NoTreated, IL-13, IL-22, COMBO = IL-4+IL-13+IL-22+TNF-α),",
+            " 6 replicates each,",
             " 2 batch days. See Getting Started \u2192 Overview for details.")
     ),
 
@@ -585,19 +586,33 @@ observe({
                       selected = if (length(shape_opts) > 1) shape_opts[2] else "None")
 })
 
-# ── PCA reactive (cached — only recomputes when se_filt changes) ──────────────
+# ── PCA reactive (recomputes when se_filt or the protein-set selector changes) ──
 # Data Inspection plots use the *pre-imputation* matrix (rv$se_filt) so that
 # PCA reflects the structure of the observed data, not the imputation pattern.
 # We keep only proteins observed in every sample (complete cases) so PCA is
 # well-defined; the count is reported in the plot subtitle.
 pca_data <- reactive({
     req(rv$se_filt)
-    mat          <- assay(rv$se_filt)
-    mat_complete <- mat[complete.cases(mat), , drop = FALSE]
+    # Matrix selector: pre-imputation (observed values, complete cases) or
+    # post-imputation (full imputed matrix). PCA is unscaled (scale. = FALSE),
+    # matching the configuration of the paper figures in both views.
+    use_post     <- isTRUE(input$di_pca_matrix == "post") && !is.null(rv$se_imp)
+    mat          <- if (use_post) assay(rv$se_imp) else assay(rv$se_filt)
+    mat_complete <- if (use_post) mat else mat[complete.cases(mat), , drop = FALSE]
     n_prot       <- nrow(mat_complete)
     if (n_prot < 2 || ncol(mat_complete) < 2)
         return(list(df = NULL, var_exp = numeric(0), n_prot = n_prot, n_pc = 0))
-    pca_obj      <- prcomp(t(mat_complete), scale. = TRUE, center = TRUE)
+
+    # Protein-set selector: top 500 most variable proteins (main PCA figure
+    # in the paper) or all proteins of the selected matrix (supplementary).
+    use_top500   <- isTRUE(input$di_pca_proteins == "top500")
+    n_top        <- 500L
+    mat_pca      <- mat_complete
+    if (use_top500 && n_prot > n_top) {
+        prot_var <- apply(mat_complete, 1, var)
+        mat_pca  <- mat_complete[order(prot_var, decreasing = TRUE)[seq_len(n_top)], , drop = FALSE]
+    }
+    pca_obj      <- prcomp(t(mat_pca), scale. = FALSE, center = TRUE)
     var_exp      <- round(100 * pca_obj$sdev^2 / sum(pca_obj$sdev^2), 1)
     n_pc         <- min(10, ncol(pca_obj$x))
     pca_df       <- as.data.frame(pca_obj$x[, seq_len(n_pc), drop = FALSE])
@@ -608,7 +623,9 @@ pca_data <- reactive({
         if (col %in% colnames(cd))
             pca_df[[col]] <- cd[pca_df$sample_name, col]
 
-    list(df = pca_df, var_exp = var_exp, n_prot = n_prot, n_pc = n_pc)
+    list(df = pca_df, var_exp = var_exp, n_prot = n_prot, n_pc = n_pc,
+         n_used = nrow(mat_pca), mode = if (use_top500) "top500" else "all",
+         matrix_mode = if (use_post) "post" else "pre")
 })
 
 # Update PC axis choices after PCA runs
@@ -666,16 +683,28 @@ output$di_pca_plot <- renderPlotly({
         layout(
             title = list(
                 text = paste0("<b>PCA</b>  <span style='font-size:12px;color:#6c757d;'>",
-                              pca$n_prot, " proteins (complete cases, pre-imputation), ",
+                              if (!is.null(pca$mode) && pca$mode == "top500" && pca$n_used < pca$n_prot)
+                                  paste0(pca$n_used, " most variable of ", pca$n_prot, " proteins")
+                              else
+                                  paste0(pca$n_prot, " proteins"),
+                              if (!is.null(pca$matrix_mode) && pca$matrix_mode == "post")
+                                  " (imputed), "
+                              else
+                                  " (observed, pre-imputation), ",
                               ncol(rv$se_filt), " samples</span>"),
                 font = list(family = "Segoe UI", size = 15, color = "#002855"),
                 x    = 0.01),
-            xaxis  = list(title      = paste0(pc_x, "  (", var_x, "%)"),
+            xaxis  = list(title      = list(text = paste0(pc_x, "  (", var_x, "%)"),
+                                            font = list(size = 18)),
+                          tickfont   = list(size = 14),
                           gridcolor  = "#e9ecef", zerolinecolor = "#ced4da", zeroline = TRUE),
-            yaxis  = list(title      = paste0(pc_y, "  (", var_y, "%)"),
+            yaxis  = list(title      = list(text = paste0(pc_y, "  (", var_y, "%)"),
+                                            font = list(size = 18)),
+                          tickfont   = list(size = 14),
                           gridcolor  = "#e9ecef", zerolinecolor = "#ced4da", zeroline = TRUE),
-            legend = list(title       = list(text = paste0("<b>", col_var, "</b>")),
-                          orientation = "h", y = -0.22, font = list(size = 11)),
+            legend = list(title       = list(text = paste0("<b>", col_var, "</b>"),
+                                             font = list(size = 14)),
+                          orientation = "h", y = -0.22, font = list(size = 13)),
             paper_bgcolor = "white", plot_bgcolor = "white",
             margin = list(t = 75, b = 80)
         ) %>%
@@ -2135,9 +2164,9 @@ output$de_dereg_plot <- renderPlotly({
                                "<br><span style='font-size:11px;color:#6c757d;'>",
                                fac_name,": ",fac_lev[1]," (y) vs ",fac_lev[2]," (x)</span>"),
                    font=list(family="Segoe UI",size=13,color="#002855"),x=0.01),
-        xaxis=list(title=paste0("Full effect (",fac_lev[2],")"),gridcolor="#e9ecef",
+        xaxis=list(title=paste0("log\u2082FC (",fac_lev[2],")"),gridcolor="#e9ecef",
                    zeroline=TRUE,zerolinecolor="#dee2e6"),
-        yaxis=list(title=paste0("Full effect (",fac_lev[1],")"),gridcolor="#e9ecef",
+        yaxis=list(title=paste0("log\u2082FC (",fac_lev[1],")"),gridcolor="#e9ecef",
                    zeroline=TRUE,zerolinecolor="#dee2e6"),
         legend=list(orientation="h",y=-0.2,font=list(size=10)),
         paper_bgcolor="white",plot_bgcolor="white",margin=list(t=70,b=70)
@@ -2175,7 +2204,7 @@ output$de_dereg_panel_ui <- renderUI({
                tags$b("Interpretation:"), " Proteins along the diagonal behave consistently across",
                " both factor levels. Off-diagonal proteins show factor-dependent regulation.",
                " The deregulogram is more restrictive than the interaction volcano — it requires",
-               " a significant interaction AND a biologically relevant full effect in at least one level.")
+               " a significant interaction AND a biologically relevant log\u2082FC in at least one level.")
     )
 })
 
@@ -2184,14 +2213,15 @@ output$de_deg_table <- DT::renderDT({
     req(de_volcano_data())
     df       <- de_volcano_data()
     alpha    <- input$alpha; lfc_v <- input$lfc
-    sig_df   <- df[df$sig_class != "Not significant", , drop=FALSE]
+    show_all <- isTRUE(input$de_show_all)
+    sig_df   <- if (show_all) df else df[df$sig_class != "Not significant", , drop=FALSE]
     gf       <- trimws(if (!is.null(input$de_gene_filter)) input$de_gene_filter else "")
     if (nchar(gf) > 0)
         sig_df <- sig_df[grepl(gf, sig_df$gene, ignore.case=TRUE) |
                          grepl(gf, sig_df$protein_id, ignore.case=TRUE), , drop=FALSE]
     if (!nrow(sig_df)) {
         return(DT::datatable(
-            data.frame(Note="No significant proteins at current thresholds / filter."),
+            data.frame(Note="No proteins at current thresholds / filter."),
             rownames=FALSE, options=list(dom="t")))
     }
     sig_df  <- sig_df[order(sig_df$p_adj, na.last=TRUE), ]
@@ -2231,6 +2261,8 @@ output$de_deg_table <- DT::renderDT({
         tbl[[paste0("Mean_", c1)]] <- mean_c1
         tbl[[paste0("Mean_", c2)]] <- mean_c2
     }
+    if (show_all)
+        tbl$Significant <- ifelse(grepl("^Significant", sig_df$sig_class), "Yes", "No")
     tbl$Imputed <- sig_df$imputed
     tbl$Imputation.type <- if (is_main) imp_ty else NA_character_
     DT::datatable(tbl, rownames=FALSE,
@@ -2240,10 +2272,12 @@ output$de_deg_table <- DT::renderDT({
             dom="Bfrtip", pageLength=20, scrollX=TRUE,
             buttons=list(
                 list(extend="csv",   text="CSV",
-                     filename=paste0("DEPs_",ct_lbl,"_",Sys.Date()),
+                     filename=paste0(if(show_all) "AllProteins_" else "DEPs_",
+                                     ct_lbl,"_",Sys.Date()),
                      exportOptions=list(modifier=list(page="all", search="none"))),
                 list(extend="excel", text="Excel",
-                     filename=paste0("DEPs_",ct_lbl,"_",Sys.Date()),
+                     filename=paste0(if(show_all) "AllProteins_" else "DEPs_",
+                                     ct_lbl,"_",Sys.Date()),
                      exportOptions=list(modifier=list(page="all", search="none")))
             )
         )
@@ -2263,6 +2297,65 @@ output$de_deg_table <- DT::renderDT({
 ## download stops at row 20 (the pageLength). Trade-off: the entire DEP table
 ## is shipped to the browser at render time. For typical proteomics outputs
 ## (a few thousand significant proteins per contrast) this is fine.
+
+# ── Full results download (ALL tested proteins, no filters) ──────────────────
+## One-click export of the complete results table for the selected contrast and
+## effect type: every tested protein, regardless of the adj.p / log2FC
+## thresholds, the 'Show all tested proteins' checkbox or the gene filter.
+de_full_table <- reactive({
+    req(de_volcano_data())
+    df      <- de_volcano_data()
+    plot_ct <- attr(df, "plot_ct"); if (is.null(plot_ct)) plot_ct <- input$de_contrast
+    df      <- df[order(df$p_adj, na.last=TRUE), ]
+
+    # ── Per-contrast imputation type + mean abundances (main effects only) ──
+    parts   <- strsplit(plot_ct, "_vs_")[[1]]
+    imp_map <- metadata(rv$se_imp)$imputation_map
+    cd_imp  <- as.data.frame(colData(rv$se_imp))
+    is_main <- length(parts) == 2 && !is.null(imp_map) &&
+               all(parts %in% as.character(cd_imp$condition))
+    if (is_main) {
+        c1 <- parts[1]; c2 <- parts[2]
+        imp_ty  <- .imp_classify(imp_map, cd_imp, c1, c2)
+        mat_imp <- assay(rv$se_imp)
+        m_idx   <- match(df$protein_id, rownames(mat_imp))
+        mean_c1 <- round(rowMeans(mat_imp[, cd_imp$condition == c1, drop=FALSE],
+                                  na.rm=TRUE)[m_idx], 3)
+        mean_c2 <- round(rowMeans(mat_imp[, cd_imp$condition == c2, drop=FALSE],
+                                  na.rm=TRUE)[m_idx], 3)
+        imp_ty  <- unname(imp_ty[df$protein_id])
+    }
+
+    tbl <- data.frame(
+        Gene      = df$gene,
+        ProteinID = df$protein_id,
+        Contrast  = plot_ct,
+        log2FC    = round(df$log2FC, 4),
+        p.value   = format(df$p_val, digits=3, scientific=TRUE),
+        adj.p     = format(df$p_adj, digits=3, scientific=TRUE),
+        "-log10(adj.p)" = round(df$neg_log10_p, 2),
+        Direction = ifelse(df$log2FC > 0, "\u2191 Up", "\u2193 Down"),
+        Significant = ifelse(grepl("^Significant", df$sig_class), "Yes", "No"),
+        check.names=FALSE, stringsAsFactors=FALSE
+    )
+    if (is_main) {
+        tbl[[paste0("Mean_", c1)]] <- mean_c1
+        tbl[[paste0("Mean_", c2)]] <- mean_c2
+    }
+    tbl$Imputed <- df$imputed
+    tbl$Imputation.type <- if (is_main) imp_ty else NA_character_
+    tbl
+})
+
+output$dl_de_full <- downloadHandler(
+    filename = function() {
+        slot <- if (!is.null(input$de_effect_type)) input$de_effect_type else "all_common_effect"
+        paste0("AllProteins_", input$de_contrast, "_", slot, "_", Sys.Date(), ".csv")
+    },
+    content = function(file) {
+        write.csv(de_full_table(), file, row.names=FALSE)
+    }
+)
 ```
 
 ## Overview
@@ -2297,7 +2390,7 @@ Standardized, design-aware downstream analysis of **label-free quantitative prot
 
 **Example dataset**
 
-The example files (`annotation_HaCaT.tsv`, `HaCaT_pg_matrix.tsv`) contain a label-free DIA proteomics experiment (DIA-NN, Orbitrap Astral) of **HaCaT keratinocytes** — a spontaneously immortalized aneuploid human keratinocyte cell line (Boukamp *et al.*, 1988, *J. Cell Biol.* 106(3):761–771) — stimulated with IL-13, IL-22, or the combination IL-13+IL-22+TNF-α (COMBO) versus unstimulated controls: 24 samples, 4 conditions × 6 replicates, 2 batch days, 9,733 protein groups.
+The example files (`annotation_HaCaT.tsv`, `HaCaT_pg_matrix.tsv`) contain a label-free DIA proteomics experiment (DIA-NN, Orbitrap Astral) of **HaCaT keratinocytes** — a spontaneously immortalized aneuploid human keratinocyte cell line (Boukamp *et al.*, 1988, *J. Cell Biol.* 106(3):761–771) — stimulated with IL-13, IL-22, or the cytokine combination IL-4+IL-13+IL-22+TNF-α (COMBO) versus unstimulated controls: 24 samples, 4 conditions × 6 replicates, 2 batch days, 9,733 protein groups.
 
 ---
 
@@ -2429,6 +2522,14 @@ tags$div(
         style = "font-size:.73em;font-weight:700;text-transform:uppercase;
                  letter-spacing:.08em;color:#00F0BE;margin-bottom:8px;",
         icon("circle-nodes"), " PCA options"),
+    selectInput("di_pca_proteins", "Proteins in PCA",
+                choices = c("Top 500 most variable" = "top500",
+                            "All proteins"          = "all"),
+                selected = "top500"),
+    selectInput("di_pca_matrix", "Data matrix",
+                choices = c("Pre-imputation (observed)" = "pre",
+                            "Post-imputation"           = "post"),
+                selected = "pre"),
     selectInput("di_color_by", "Colour samples by",
                 choices = c("condition"), selected = "condition"),
     selectInput("di_shape_by", "Shape samples by",
@@ -2447,9 +2548,11 @@ tags$div(
     tags$div(class="text-muted",
              style="font-size:.78em;line-height:1.5;",
              icon("circle-info"),
-             tags$b(" Data Inspection"), " uses the ",
+             tags$b(" Data Inspection"), " uses by default the ",
              tags$em("pre-imputation"), " matrix to validate the structure",
              " of your input data (sample QC, normalization, batch detection).",
+             " The PCA can also show the ", tags$em("post-imputation"),
+             " matrix (Data matrix selector above).",
              tags$br(), tags$br(),
              "The ", tags$em("Protein Abundance Explorer"),
              " moved to the ", tags$b("Imputation & Filtering"), " tab where",
@@ -2750,6 +2853,9 @@ tags$div(
              icon("table"), " DEP Table Filter"),
     textInput("de_gene_filter", "Filter table by gene / protein ID",
               value="", placeholder="e.g. SERPINB3, CCL26\u2026"),
+    checkboxInput("de_show_all",
+                  "Show all tested proteins (not only significant)",
+                  value=FALSE),
     tags$div(class="text-muted mt-1", style="font-size:.78em;line-height:1.4;",
              icon("circle-info"),
              " Partial match, case-insensitive. Use column headers in table for additional filters.")
@@ -2805,9 +2911,17 @@ LDV/LDV pairs are excluded from BH correction and will have <em>NA</em> adjusted
 tags$p(style="font-size:.82em;color:#6c757d;margin-bottom:6px;",
        icon("circle-info"),
        " Significant proteins for the selected contrast and effect type.",
+       " Tick 'Show all tested proteins' in the sidebar to inspect any tested",
+       " protein, including those that did not reach significance.",
        " Gene Filter and column-header boxes narrow the view; ",
        tags$b("CSV / Excel buttons export the entire table"),
        " (all rows, not just the visible page).")
+tags$div(style="margin:2px 0 8px;",
+    downloadButton("dl_de_full",
+                   "Download full results table (all tested proteins)",
+                   class="btn-sm btn-outline-primary"),
+    tags$span(style="font-size:.78em;color:#6c757d;margin-left:8px;",
+              " every tested protein, with and without significance \u2014 no filters applied"))
 DT::DTOutput("de_deg_table")
 ```
 
